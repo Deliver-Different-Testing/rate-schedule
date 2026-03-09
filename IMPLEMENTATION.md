@@ -1,232 +1,126 @@
 # Rate Schedule — Implementation Guide
 
-## Overview
-
-Client-facing rate schedule generation for DFRNT courier tenants. Generates printable/PDF rate schedules showing suburb-to-suburb pricing for on-demand, scheduled, regional, and international services.
-
-**Three output formats:**
-1. **HTML preview** — rendered in-browser (React component)
-2. **PDF** — QuestPDF landscape A4, DFRNT branded (3 pages)
-3. **CSV export** — raw rate data for download
-
----
-
-## Architecture
+## Architecture Overview
 
 ```
-┌─────────────────────────────────────────────────┐
-│ React Frontend (preview + config)                │
-│   RateSchedule.tsx (1,492 lines)                │
-│   mockData.ts (development data)                 │
-├─────────────────────────────────────────────────┤
-│ API Layer                                        │
-│   RateScheduleController.cs                      │
-│   GET /api/RateSchedule/{clientId}               │
-│   GET /api/RateSchedule/{clientId}/csv           │
-│   POST /api/RateSchedule/prospect                │
-├─────────────────────────────────────────────────┤
-│ Service Layer                                    │
-│   RateScheduleService.cs (557 lines)            │
-│   RegionalRateService.cs (153 lines)            │
-│   InternationalRateService.cs (145 lines)       │
-├─────────────────────────────────────────────────┤
-│ Data Layer (EF Core + SP calls)                  │
-│   DespatchContext → tblSuburb, tblRateCode,     │
-│   tblJobType, UTL_fncJob_Rate                   │
-│   WS_stpJobType_RatesAsync (stored procedure)   │
-└─────────────────────────────────────────────────┘
+┌─────────────────┐     ┌──────────────────────┐     ┌─────────────┐
+│  React Frontend │────▶│  .NET 8 Backend API  │────▶│  TMS API    │
+│  (Preview/Config)│     │  (QuestPDF Renderer)  │     │  (SQL SP)   │
+└─────────────────┘     └──────────────────────┘     └─────────────┘
 ```
 
----
+- **Frontend**: React/Vite/Tailwind — previews rate schedules with mock data, admin config page
+- **Backend**: ASP.NET Core 8 — fetches live data from TMS API, renders PDF via QuestPDF
+- **TMS API**: Existing system — exposes stored procedure `WS_stpJobType_Rates` for rate lookups
 
 ## Source Files
 
-### Backend — Models (`backend/Models/`)
+### Backend (`backend/`)
 
-| File | Lines | Purpose |
-|------|-------|---------|
-| `ClientRateInfo.cs` | 38 | Internal model for client lookup (tblClient + tblRateCode + tblSuburb) |
-| `RateScheduleItem.cs` | 21 | Single row in rate schedule — maps to `#RateSchedule` temp table from SP |
-| `RateScheduleRequest.cs` | 29 | Request DTO: ClientId, FromSuburbId, IncludeGst, IncludeFuelSurcharge, Markup |
-| `RateScheduleResponse.cs` | 28 | Response DTO: client info + List<RateScheduleItem> + regional + international |
-| `ProspectRateRequest.cs` | 57 | Prospect rate request — locations provided directly (no client record) |
-| `RegionalRateItem.cs` | 40 | City-to-city route rate (e.g., AKL→WLG) with weight tiers |
-| `InternationalRateItem.cs` | 43 | International destination rate with weight tiers and regions |
-| `ServiceGroup.cs` | 20 | Enum: OnDemand, Scheduled, Regional, International |
-| `TblRateCode.cs` | 20 | EF Core entity for `tblRateCode` table |
+| File | Description |
+|------|-------------|
+| `Models/RateScheduleData.cs` | Data models: `RateScheduleData`, `RateRow` (10 speed columns), `ScheduledServiceRow`, `ExtraChargesData`, `WeightSurcharge`, `AfterHoursCharges` |
+| `Services/RateScheduleDataService.cs` | Fetches data from TMS API — calls SP per destination suburb, maps JobTypeID to speed columns, gets scheduled services + extras |
+| `Documents/RateScheduleDocument.cs` | QuestPDF `IDocument` — 3-page landscape A4: rate matrix, scheduled services, extra charges. Matches HTML mockup exactly (Inter font, DFRNT colors) |
+| `Controllers/RateScheduleController.cs` | API endpoints: `GET /api/reports/rate-schedule/{clientId}` (PDF), `GET .../preview` (JSON) |
 
-### Backend — Services (`backend/Services/`)
+### Frontend (`frontend/`)
 
-| File | Lines | Purpose |
-|------|-------|---------|
-| `IRateScheduleService.cs` | 16 | Interface: `GenerateAsync` + `GenerateProspectAsync` |
-| `RateScheduleService.cs` | 557 | **Core service** — calls SP, pivots results into rate matrix, applies GST/MFV/markup |
-| `IRegionalRateService.cs` | 26 | Interface for regional city-to-city rates |
-| `RegionalRateService.cs` | 153 | Regional rate service (placeholder — SP not yet identified) |
-| `IInternationalRateService.cs` | 24 | Interface for international destination rates |
-| `InternationalRateService.cs` | 145 | International rate service (placeholder — may be manual quoting) |
+| File | Description |
+|------|-------------|
+| `src/App.tsx` | HashRouter — `/` preview, `/config` admin |
+| `src/types/index.ts` | TypeScript interfaces matching C# models |
+| `src/data/mockRates.ts` | All 57 suburbs with actual prices from the HTML mockup |
+| `src/pages/RateSchedulePreview.tsx` | Tab-based preview matching the HTML mockup |
+| `src/pages/RateScheduleConfig.tsx` | Admin config for client, suburb, speeds, surcharges |
+| `src/components/RateTable.tsx` | On-demand rate matrix with ASAP column highlighting |
+| `src/components/ScheduledServicesTable.tsx` | Scheduled services with color-coded badges |
+| `src/components/ExtraChargesGrid.tsx` | 2-column surcharge cards + understanding box |
+| `src/components/RateScheduleHeader.tsx` | DFRNT branded header with logo SVG |
 
-### Backend — Controllers (`backend/Controllers/`)
+### Root
 
-| File | Lines | Purpose |
-|------|-------|---------|
-| `RateScheduleController.cs` | 136 | API endpoints: GET client rates, GET CSV, POST prospect rates |
-
-### Frontend (`frontend/src/pages/RateSchedule/`)
-
-| File | Lines | Purpose |
-|------|-------|---------|
-| `RateSchedule.tsx` | 1,492 | Full React component — 3-page preview matching HTML mockup |
-| `mockData.ts` | ~100 | Mock rate data for development (57 Auckland suburbs) |
-
-### HTML Mockup (root)
-
-| File | Purpose |
-|------|---------|
-| `index.html` | Static HTML mockup deployed to GitHub Pages — visual reference |
-| `rate-schedule-saatchi-parnell.csv` | Sample CSV data for Saatchi & Saatchi, Parnell |
-
----
+| File | Description |
+|------|-------------|
+| `index.html` | Original HTML mockup (deployed on gh-pages, do not modify) |
+| `rate-schedule-saatchi-parnell.csv` | CSV export of the rate data |
 
 ## Data Flow
 
-### On-Demand Rates
-
-1. **Client lookup**: `tblClient` → get `SuburbId` (origin), `StandardRateCodeId`
-2. **Suburb list**: `tblSuburb` → get all destination suburbs for the client's `SiteId`
-3. **Rate calculation**: For each destination suburb, call `WS_stpJobType_RatesAsync` stored procedure
-   - Input: `FromSuburbId`, `ToSuburbId`, `ClientId`, `BookDate`
-   - Output: `JobTypeID`, `Name`, `SaleRate`, `Rate`, `Availability`
-4. **Pivot**: Group by destination suburb, map each JobType to speed column (Eco, 3hr, 2hr, 90min, 75min, 1hr, 45min, 30min, 15min, Direct)
-5. **Apply surcharges**: GST (15%), MFV (monthly fuel variation %), client markup
-
-### Speed Column Mapping
-
-```csharp
-// JobType SystemNames → column positions
-"EC"  → Eco
-"3H"  → 3 Hour
-"2H"  → 2 Hour
-"90M" → 90 Min
-"75M" → 75 Min
-"1H"  → 1 Hour
-"45M" → 45 Min
-"30M" → 30 Min
-"15M" → 15 Min
-"DIR" → Direct
 ```
-
-### Key Database References
-
-| Table/SP | Purpose |
-|----------|---------|
-| `tblClient` | Client record — `UcclSuburbId` = origin suburb |
-| `tblSuburb` | Suburb master — `UcsuArea` = area grouping, `SiteId` = depot |
-| `tblRateCode` | Rate code amounts (standard, van) |
-| `tblJobType` | Job type definitions with `SystemName` for speed mapping |
-| `WS_stpJobType_RatesAsync` | **Main SP** — returns rates for a suburb pair |
-| `UTL_fncJob_Rate` | Rate calculation function (called by SP internally) |
-
----
+1. Client requests PDF → GET /api/reports/rate-schedule/{clientId}?fromSuburbId=X
+2. RateScheduleDataService fetches client info from TMS API
+3. Gets list of destination suburbs (linked via TucSuburb.UcsuArea)
+4. For EACH destination suburb, calls:
+   POST /api/Rates/GetRateSchedule → WS_stpJobType_Rates SP
+   Returns: [{ JobTypeID, Name, SaleRate, Rate, Availability }, ...]
+5. Maps SP results to RateRow speed columns via JobTypeID lookup
+6. Gets scheduled services from client contract data
+7. Gets extra charges from system config (with defaults fallback)
+8. RateScheduleDocument renders 3-page landscape A4 PDF via QuestPDF
+9. Returns PDF as file download
+```
 
 ## API Endpoints
 
-### `GET /api/RateSchedule/{clientId}`
+| Method | Path | Response | Description |
+|--------|------|----------|-------------|
+| GET | `/api/reports/rate-schedule/{clientId}` | `application/pdf` | Generate and download PDF |
+| GET | `/api/reports/rate-schedule/{clientId}/preview` | `application/json` | Get rate data as JSON for frontend preview |
 
-Query params:
-- `fromSuburbId` (optional — defaults to client's home suburb)
-- `includeGst` (default: true)
-- `includeFuelSurcharge` (default: true)
-- `markup` (default: 0)
-- `preparedFor` (optional label)
+Query params: `?fromSuburbId=N` (optional, defaults to client's primary site)
 
-Returns: `RateScheduleResponse` JSON
+## Rate Calculation Logic
 
-### `GET /api/RateSchedule/{clientId}/csv`
+Rates are **suburb-based**, not static rate codes. The system:
 
-Same params. Returns CSV download.
+1. Looks up the origin suburb (client's site/depot)
+2. Gets all destination suburbs from the `TucSuburb` table
+3. `TucSuburb.UcsuArea` = area grouping (determines rate tier)
+4. `SiteId` = depot/origin identifier
+5. For each origin→destination pair, the SP returns available speeds with rates
+6. `SaleRate` takes priority over `Rate` (client-specific vs default)
+7. `Availability = false` means the speed isn't offered for that route (shown as "—")
 
-### `POST /api/RateSchedule/prospect`
+### Speed Column Mapping
 
-Body: `ProspectRateRequest` — for generating rates without a client record.
+The SP returns `JobTypeID` values that map to speed columns:
 
----
+| JobTypeID | Column | Label |
+|-----------|--------|-------|
+| 1 | 0 | Eco |
+| 2 | 1 | 3 Hour |
+| 3 | 2 | 2 Hour |
+| 4 | 3 | 90 Min |
+| 5 | 4 | 75 Min |
+| 6 | 5 | 1 Hour |
+| 7 | 6 | 45 Min |
+| 8 | 7 | 30 Min |
+| 9 | 8 | 15 Min |
+| 10 | 9 | Direct |
 
-## React Frontend
+> **Note:** These mappings need to be verified against the actual TMS database. The JobTypeID values may differ.
 
-### 3-Page Layout (matching HTML mockup)
+## DFRNT Design System
 
-**Page 1 — On-Demand Rate Matrix**
-- DFRNT header with logo, client name, date
-- Title: "On-Demand Rate Schedule"
-- Disclaimer: "From: {suburb} | If your delivery suburb is not listed, please contact us"
-- Rate table: destination × speed columns (Eco through Direct)
-- ASAP columns (45min, 30min, 15min) tinted cyan
-- Unavailable routes shown as "—"
-- Footer: DIRECT/ASAP explanations, MFV/GST notes
+| Token | Value |
+|-------|-------|
+| Primary | `#0d0c2c` |
+| Cyan | `#3bc7f4` |
+| Light Grey | `#f4f2f1` |
+| Table Header | `#0d0c2c` |
+| ASAP Header | `#163550` |
+| Border | `#e4e4e8` |
+| Even Row | `#f8f8fa` |
+| Font | Inter (300–700) |
+| Grid | 8pt base |
 
-**Page 2 — Scheduled Service Rates**
-- Contracted routes table with service badges (Next Day, Same Day, Morning, Afternoon)
-- Base rate + estimated with MFV
+## Mock Data
 
-**Page 3 — Extra Charges & Information**
-- 2-column card grid: Extra Items, Weight Surcharges, After Hours, Van/Multi-Trip, MFV, PPD
-- "Understanding Your Rates" info box
+The `mockRates.ts` file contains all 57 destination suburbs with actual prices extracted from the HTML mockup (Saatchi & Saatchi, from Parnell). Rate tiers observed:
 
-### Design System
-- Font: Inter
-- Primary: #0d0c2c
-- Cyan: #3bc7f4
-- Table headers: #0d0c2c background, white text
-- Alternating rows: #f8f8fa / #fff
-- ASAP column tint: rgba(59, 199, 244, 0.06)
-
----
-
-## Print / PDF Flow
-
-### Current: HTML Print
-The HTML mockup supports `@media print` with proper page breaks.
-
-### Target: QuestPDF
-The `RateScheduleDocument.cs` (not yet created) will use QuestPDF to render identical layout as a PDF. This should:
-1. Accept `RateScheduleResponse` data
-2. Render 3-page landscape A4
-3. Match the HTML mockup's visual layout exactly
-4. Use `SkiaSharp` for the DFRNT atom logo SVG
-
----
-
-## File Counts
-
-| Category | Files | Lines |
-|----------|-------|-------|
-| C# Models | 9 | 296 |
-| C# Services | 6 | 921 |
-| C# Controllers | 1 | 136 |
-| React Frontend | 2 | ~1,592 |
-| HTML Mockup | 1 | ~380 |
-| **Total** | **19** | **~3,325** |
-
----
-
-## What's Done vs What Needs Wiring
-
-### ✅ Done
-- Full rate schedule service (557 lines) with SP calling, pivot logic, surcharge application
-- Regional rate service interface + placeholder
-- International rate service interface + placeholder
-- Prospect rate flow (no client record needed)
-- API controller with 3 endpoints
-- React preview component matching HTML mockup
-- Mock data for development
-- HTML mockup as visual reference
-
-### 🔲 Needs Wiring
-- QuestPDF document renderer (`RateScheduleDocument.cs`) — not yet created
-- Wire `DespatchContext` to actual database connection
-- Validate SP parameter names against live database
-- Kevin's old rate schedule SP — may have additional logic to incorporate
-- Regional rate data source — SP not yet identified
-- International pricing — may be entirely manual
-- Weight/dims surcharge panel on HTML mockup (done) needs to pull from `tblSurcharge` or config
+- **Local** (Eco available): $8.45–$18.74 — Parnell, City, Eden Terrace, Freemans Bay, Grey Lynn, etc.
+- **Near** (no Eco, 30min available): $10.94–$88.70 — Epsom, Greenlane, Remuera, Morningside
+- **Mid** (no Eco, no 30min): $14.08–$99.81 — Avondale, Airport, Henderson, etc.
+- **Far** (no Eco, no 30min): $21.12–$133.08 — Browns Bay, Howick, Manukau, etc.
+- **Very far** (limited speeds): $35.20–$155.19 — Manurewa, Papakura, Drury
